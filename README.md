@@ -356,3 +356,39 @@ logeion-educational-material/
 ```
 
 Separate bucket from private lesson PDFs (`logeion-private-lesson-costs`).
+
+---
+
+## Teacher Uploads (added 2026-07-06)
+
+Teachers can upload material but may assign it **only** to grades/classes/courses they teach.
+
+**Backend:**
+- Route `POST /educational-material/create-teacher-educational-material` (`authMiddleware, isTeacher,
+  upload.single("file")`) → `createTeacherEducationalMaterial`. The download route
+  `/get-educational-material/:materialId` was widened to include `teacher` via
+  `authorizeRoles("store-user","student","parent","teacher")`. Store-user create/edit/delete unchanged.
+- `createTeacherEducationalMaterial` (`controllers/educational-material.js`): same S3 upload + DB save
+  as the store-user create (`createdBy` = the teacher's user id — that's the key
+  `getTeacherEducationalMaterials` filters on), but with an **authorization gate** on the incoming
+  `period_permissions` scope BEFORE upload:
+  - `teacherHandler.getTeacherByUserId` + `getTeacherPeriodAssignmentIds` → `courseIds`, `classIds`.
+  - Allowed grades = the `grade_id` of the teacher's courses + classes
+    (`courseHandler.getCoursesById` + `classHandler.getClassesById`).
+  - Rejects with `course_not_assigned_to_teacher` / `class_not_assigned_to_teacher` /
+    `grade_not_assigned_to_teacher` if the permission references anything outside that scope.
+- New handler `getTeacherEducationalMaterials(store_id, user_id, period_id)` — the teacher's OWN
+  uploads (`createdBy = user_id`), `period_permissions` collapsed to the active period (same shape as
+  `getPeriodEducationalMaterial`). Used by the **bootstrap teacher branch** to hydrate their materials.
+
+**Frontend (adapted, not parallel):**
+- `/educational-material` route roles += `teacher`. `EducationalMaterialComponent` reads
+  `selectEducationalMaterials` — already only the teacher's own uploads (from bootstrap) — so the list
+  works as-is.
+- `AddEducationalMaterialComponent`: the cascading Grade→Class→Course pickers read the store slices,
+  which for a teacher are already only their classes/courses (grades slice is still store-wide → the
+  backend re-validates). `save()` calls `EducationalMaterialService.addTeacherEducationalMaterial(...)`
+  when `userRole === 'teacher'` (read from `localStorage.user`), else the admin create. The branched
+  observable is typed `Observable<{success, message}>` to avoid a non-callable union at compile time.
+
+See the **teacher-management** brain repo for the whole teacher portal.
