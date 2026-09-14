@@ -6,6 +6,83 @@
 
 ## Change log
 
+### 2026-09-11 — Period filter + "Εισαγωγή στην τρέχουσα περίοδο" (import to the active period)
+Admin can reuse a material from an older (or any other) teaching period in the period they are
+working in, **without copying the file**. Chosen design: **Παραλλαγή Α — share, don't move**.
+**Frontend-only** (no backend change — it rides on the existing edit endpoint); shipped in frontend
+`324ab57` (release 1.5.14) together with the admin active-period override (authentication brain repo).
+Recorded 2026-09-14, verified against code.
+
+**How it works (the flow)**
+1. The admin "enters" the target period (teaching-periods card → *Ενεργή για εμένα*; see the
+   authentication brain repo) — or simply works in the store default.
+2. `/educational-material` now has a **period filter** (store-user only): default = the **active
+   period** (`PeriodSwitchService.getActivePeriodId()` override, else the store `default:true`
+   period), plus **«Όλες οι περίοδοι»** (`'all'`). Non-admins always see `'all'` of what bootstrap
+   gave them.
+3. Each card shows **period badges** (one per `period_permissions` entry, the active one
+   highlighted). A card with **no entry for the active period** shows **«Εισαγωγή στην τρέχουσα
+   περίοδο»** (`enter-outline`) — `canImport` = store-user ∧ activePeriodId ∧ no active entry ∧ not
+   deleted.
+4. The button opens `AddEducationalMaterialComponent` with `importMode: true`, `activePeriodId`, and
+   `sourcePeriodId` = the filtered period if the material has an entry there, else its first entry.
+5. **Prefill:** seed = the active-period entry if one exists, else (import) the **source** entry.
+   When seeding cross-period, `keepValid()` keeps only the `classes` / `courses` / `students` ids
+   that exist in the currently loaded (active-period) slices — those are per-period; **grades carry
+   over as-is** (store-level). The file upload is hidden and an explanatory banner is shown.
+6. **Save** → existing `editEducationalMaterial(material, newFile=false)` →
+   `POST /educational-material/edit-store-educational-material` → backend
+   `upsertPeriodPermission(materialId, resolveActivePeriod(req)._id, permission, …)` → no entry for
+   that period → **`$push`** a new `period_permissions` entry. The source period's entry is
+   **untouched** (students/teachers of the old period keep access).
+
+**Bonus fixes in the same pass**
+- **Edit loads the ACTIVE period's entry** (`permForPeriod(activePeriodId)`), not blindly
+  `period_permissions[0]` — before this, editing a multi-period material could show/overwrite the
+  wrong period's permissions in the form.
+- **Realtime:** `educational-material.reducer.ts` `updateMaterialFields` now applies change-stream
+  keys with a deep **`_.set`** — the watcher forwards raw `updatedFields` with dot-notation keys such
+  as `period_permissions.1`; a shallow spread dropped them, so an import didn't appear live.
+- i18n: period filter / badges / import banner keys (`educational_material.*`) in el + en.
+
+**Not done / follow-ups**
+- **"Move" instead of share** (remove the source entry) — needs a new endpoint doing `$pull`.
+- **Bulk import** of many materials into a period.
+- Replacing the file on edit (`newFile=true`) swaps the **one shared S3 object for every period**
+  that references it, and the old object is not deleted from S3.
+
+### Period model — current state (verified 2026-09-14)
+
+Drift found while recording the feature above; the older sections below predate these:
+
+- **`period_permissions[].students: [ObjectId → Student]`** exists (added with teacher uploads,
+  July): a **direct grant** — a student listed there sees the material regardless of the
+  grade→class→course ladder. Teachers target classes + individual students; the admin modal only
+  shows the students picker for teachers.
+- **`getStudentEducationalMaterial` rule now:** direct `students` grant → allow; else the material
+  must target **at least one grade OR class** (both empty → nobody); grades (if any) must include the
+  student's grade; classes (if any) the student's class; courses (if any) ∩ the student's
+  `period_courses` ≠ ∅.
+- **Reads per role (bootstrap):** store-user → `getStoreEducationalMaterials(store)` (all periods,
+  still no `isDeleted` filter — the list hides deleted ones client-side / recycle bin); student →
+  `getStudentEducationalMaterial`; **parent → union of `getStudentEducationalMaterial` over the
+  children** (deduped); teacher → `getTeacherEducationalMaterials` (own uploads only, collapsed to the
+  active period). Non-admin reads go through `getPeriodEducationalMaterial(store, period)`, which
+  collapses `period_permissions` to the single entry of that period.
+- **Route** `/educational-material` RoleGuard = `store-user, student, teacher, parent`.
+- **Download gate `canDownloadMaterial(user, material)`** (`controllers/educational-material.js`):
+  store isolation first → soft-deleted blocked for non-admins → store-user always → others resolve
+  the period with `resolveActivePeriod({ user })` and allow when: **teacher** — own upload, or the
+  material's active-period `courses` intersect the courses they teach, or it is attached to the
+  **ύλη (syllabus)** of one of their courses; **student** — visible by the rule above or in the
+  syllabus of a course they attend; **parent** — the same, for any child.
+- **`visibleToTeachers` / `visibleToParents` are still never enforced** — parents get materials via
+  their children's rule regardless of `visibleToParents`.
+- All create/edit paths target the **resolved active period** (`resolveActivePeriod(req)`), so an
+  admin inside another period creates/edits that period's entry.
+- ⚠️ `editStoreEducationalMaterial` loads the material with `findById(materialId)` and never checks
+  `material.store_id` against the caller's store (create/download do) — worth an IDOR check.
+
 ### 2026-06-25 — Course-level permissions + modal redesign
 Added a third permission level (**Course / μάθημα**) so a material can be restricted to the
 students of a specific course within a class — students who don't take that course no longer
@@ -53,6 +130,7 @@ applies once that's built.
     grades: [ObjectId → Grade],
     classes: [ObjectId → Class],
     courses: [ObjectId → Course],     // ← added 2026-06-25 (course-level access)
+    students: [ObjectId → Student],   // ← direct grant, bypasses the ladder (teacher uploads, 2026-07)
     visibleToTeachers: Boolean (default: true),
     visibleToParents: Boolean (default: false)
   }],
